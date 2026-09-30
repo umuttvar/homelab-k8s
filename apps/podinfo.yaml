@@ -9,11 +9,11 @@ spec:
   source: 
     repoURL: https://github.com/umuttvar/homelab-k8s
     targetRevision: main
-    path: charts/it-tools
+    path: charts/podinfo
 
   destination:
     server: https://kubernetes.default.svc
-    namespace: it-tools
+    namespace: podinfo
 
   syncPolicy:
     automated:
