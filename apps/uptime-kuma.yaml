@@ -16,5 +16,8 @@ spec:
     namespace: uptime-kuma
 
   syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
     syncOptions:
       - CreateNamespace=true
