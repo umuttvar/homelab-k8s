@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: podinfo
+  namespace: argocd
+spec: 
+  project: default
+
+  source: 
+    repoURL: https://github.com/umuttvar/homelab-k8s
+    targetRevision: main
+    path: charts/it-tools
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: it-tools
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
