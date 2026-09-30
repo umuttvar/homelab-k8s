@@ -1,0 +1,10 @@
+configs:
+  params:
+    server.insecure: true
+server:
+  ingress:
+    enabled: true
+    ingressClassName: traefik
+    hostname: argocd.lab
+dex: 
+  enabled: false

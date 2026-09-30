@@ -13,7 +13,7 @@ spec:
 
   destination:
     server: https://kubernetes.default.svc
-    namespace: podinfo
+    namespace: demo
 
   syncPolicy:
     automated:
