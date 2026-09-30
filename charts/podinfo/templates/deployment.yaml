@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: podinfo
+  namespace: {{ .Release.Namespace }}
+  annotations: 
+    kubernetes.io/change-cause: "bozuk surum denemesi"
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: podinfo
+  template:
+    metadata:
+      labels:
+        app: podinfo
+    spec:
+      containers:
+      - name: podinfo
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        ports:
+        - containerPort: 9898
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 128Mi
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 9898
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9898

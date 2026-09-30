@@ -1,0 +1,12 @@
+replicaCount: 3
+
+image:
+  repository: stefanprodan/podinfo
+  tag: "6.8.0"
+
+service:
+  nodePort: 30080
+
+ingress:
+  enabled: true
+  host: podinfo.lab

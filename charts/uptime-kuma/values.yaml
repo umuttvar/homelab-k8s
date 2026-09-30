@@ -1,0 +1,12 @@
+replicaCount: 1
+
+image:
+  repository: louislam/uptime-kuma
+  tag: 2
+
+ingress:
+  enabled: true
+  host: uptime.lab
+
+persistence:
+  size: 1Gi

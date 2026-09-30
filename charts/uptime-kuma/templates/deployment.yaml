@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uptime
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: uptime
+  template:
+    metadata:
+      labels:
+        app: uptime
+    spec:
+      containers:
+      - name: uptime
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        ports:
+        - containerPort: 3001
+        volumeMounts:
+        - name: uptime-pvc
+          mountPath: /app/data
+        resources:
+          requests:
+            cpu: 50m
+            memory: 512Mi
+          limits:
+            memory: 1Gi
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 3001
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 3001
+      volumes:
+      - name: uptime-pvc
+        persistentVolumeClaim:
+          claimName: uptime-pvc
