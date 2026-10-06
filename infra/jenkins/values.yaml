@@ -1,0 +1,15 @@
+controller: 
+  ingress: 
+    enabled: true
+    ingressClassName: traefik
+    hostName: jenkins.lab
+  resources: 
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      memory: 1Gi
+
+persistence:
+  enabled:
+    size: 8Gi
