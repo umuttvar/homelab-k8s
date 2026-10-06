@@ -1,0 +1,9 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/umuttvar/demo-app
+  tag: "1.0.11"
+
+ingress:
+  enabled: true
+  host: demo.lab
