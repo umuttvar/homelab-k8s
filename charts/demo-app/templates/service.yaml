@@ -3,10 +3,13 @@ kind: Service
 metadata:
   name: demo-app
   namespace: {{ .Release.Namespace }}
+  labels:
+    app: demo-app
 spec:
   type: ClusterIP
   selector:
     app: demo-app
   ports:
-    - port: 80
+    - name: http
+      port: 80
       targetPort: 8000
