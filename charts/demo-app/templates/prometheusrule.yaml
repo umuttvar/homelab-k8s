@@ -1,0 +1,23 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: demo-app-alerts
+  namespace: {{ .Release.Namespace }}
+  labels:
+    release: monitoring
+spec:
+  groups:
+    - name: demo-app
+      rules:
+        - alert: DemoAppHighErrorRate
+          expr: |
+            sum(rate(http_requests_total{namespace="demo-app", status="5xx"}[2m]))
+            /
+            sum(rate(http_requests_total{namespace="demo-app"}[2m]))
+            > 0.05
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "demo-app hata oranı yüksek"
+            description: {{`"Son 2 dakikada isteklerin {{ $value | humanizePercentage }} kadarı 5xx döndü."`}}
