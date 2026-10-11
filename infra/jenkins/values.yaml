@@ -6,7 +6,7 @@ controller:
     hostName: jenkins.lab
   resources:
     requests:
-      cpu: 250m
+      cpu: 200m
       memory: 1Gi
     limits:
       memory: 1Gi
