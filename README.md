@@ -42,16 +42,12 @@ The only contract between the two repos is the **image tag**.
 
 ## Highlights
 
-**TL;DR:** A 3-node Kubernetes cluster I built from bare metal, with a fully automated
-pipeline: `git push` → tests → quality gate → image scan → GitOps deploy → monitoring → email alert.
-No managed services, every layer configured and debugged by hand.
-
 - **3-node vanilla Kubernetes** (kubeadm, not k3s) on Proxmox VMs cloned from one template
 - **Zero-touch CI/CD:** tests → SonarCloud quality gate → Kaniko build → **Trivy scan before push** → GHCR → Argo CD
-- **Pull-based GitOps:** Jenkins only writes to Git and has no access to the cluster
+- **Pull-based GitOps for everything:** apps *and* platform (Traefik, MetalLB, Jenkins, monitoring, storage) are Argo CD Applications; Jenkins only writes to Git and has no access to the cluster
 - **Everything as code:** apps, Grafana dashboards and alert rules all live in this repo
 - **Metrics-driven fix:** found a misleading p95 (975 ms for a 500 ms endpoint), fixed it in code, shipped it through the pipeline, verified ~740 ms
-- **28 real incidents** documented with root cause and fix
+- **32 real incidents** documented with root cause and fix
 
 ---
 
@@ -101,7 +97,7 @@ No managed services, every layer configured and debugged by hand.
 - [x] CI with Jenkins: test → SonarCloud → Kaniko → Trivy → GHCR → GitOps commit
 - [x] Prometheus + Grafana monitoring, dashboards as code
 - [x] Alerting: PrometheusRule → Alertmanager → email
-- [ ] Manage `infra/` with Argo CD too
+- [x] Platform components (`infra/`) managed by Argo CD too, migrated with zero downtime
 - [ ] TLS with cert-manager
 - [ ] Sealed Secrets
 - [ ] Rebuild everything with Terraform (Proxmox provider) + Ansible
@@ -188,12 +184,17 @@ One IP, one port, many applications: Traefik routes each request by its HTTP `Ho
 ```
 homelab-k8s/
 ├── root-app.yaml               # Argo CD "App of Apps": the only thing applied by hand
-├── apps/                       # One Argo CD Application per chart
-│   ├── demo-app.yaml
-│   ├── podinfo.yaml
-│   ├── whoami.yaml
-│   ├── it-tools.yaml
-│   └── uptime-kuma.yaml
+├── apps/                       # One Argo CD Application per component
+│   ├── demo-app.yaml           # ┐
+│   ├── podinfo.yaml            # │ my own charts (charts/)
+│   ├── whoami.yaml             # │
+│   ├── it-tools.yaml           # │
+│   ├── uptime-kuma.yaml        # ┘
+│   ├── traefik.yaml            # ┐
+│   ├── metallb.yaml            # │ platform: upstream chart (pinned)
+│   ├── jenkins.yaml            # │ + values from infra/
+│   ├── monitoring.yaml         # │
+│   └── local-path.yaml         # ┘
 ├── charts/                     # Helm charts I wrote myself
 │   ├── demo-app/               # The app built by the CI pipeline
 │   │   ├── values.yaml         # image.tag is bumped by Jenkins on every build
@@ -210,7 +211,7 @@ homelab-k8s/
 │   ├── whoami/                 # Stateless app, 3 replicas
 │   ├── it-tools/               # Stateless SPA, 3 replicas
 │   └── uptime-kuma/            # Stateful app: PVC, single replica, Recreate strategy
-├── infra/                      # Values for third-party platform charts (installed with Helm)
+├── infra/                      # Values / manifests for platform components (used by apps/)
 │   ├── metallb/
 │   ├── traefik/
 │   ├── local-path/
@@ -220,13 +221,13 @@ homelab-k8s/
 └── docs/images/                # Screenshots used in this README
 ```
 
-> `apps/` and `charts/` are reconciled by Argo CD: a push is a deploy.
-> `infra/` is the record of how the platform was installed; it is applied with `helm upgrade` (see [Roadmap](#roadmap)).
+> Everything under `apps/`, `charts/` and `infra/` is reconciled by Argo CD: a push is a deploy.
+> The only exception is Argo CD itself (`infra/argocd/`), installed once with Helm as the bootstrap step.
 
 </details>
 
 <details>
-<summary><b>How it was built: 10 phases, from BIOS to alerting</b></summary>
+<summary><b>How it was built: 11 phases, from BIOS to a fully GitOps-managed platform</b></summary>
 
 ### Phase 0 — Turning a laptop into a hypervisor
 
@@ -429,6 +430,27 @@ Tested end to end: generated ~10 % errors → inactive → pending → firing �
 ![Alert firing in Prometheus](docs/images/15-alert-firing.png)
 ![Alert email](docs/images/16-alert-email.png)
 
+### Phase 10 — Moving the platform itself to GitOps
+
+Traefik, MetalLB, Jenkins, kube-prometheus-stack and local-path were installed with `helm`/`kubectl` before Argo CD existed.
+I migrated each of them to an Argo CD Application, **without downtime and without data loss**:
+
+- **Multi-source Applications:** the chart comes from the upstream Helm repo (pinned version), the values from this repo
+  (`ref: values` + `$values/infra/<tool>/values.yaml`). MetalLB has a third source that applies only `config.yaml`
+  from the same folder (`directory.include`).
+- **`helm.releaseName` = the original release name**, so the rendered resource names match the running ones.
+- **Adoption procedure, one tool at a time:** no automated sync → review the App Diff (expected: only the
+  `argocd.argoproj.io/tracking-id` annotation) → manual sync → delete the Helm release record
+  (`owner=helm` Secret, **not** `helm uninstall`) → enable automated sync.
+- **kube-prometheus-stack needs `ServerSideApply=true`:** its CRDs are too large for the `last-applied` annotation.
+- **Two hidden problems surfaced** (see *Problems I hit → GitOps migration*): a default StorageClass set by a manual
+  `kubectl patch` that was never in Git, and a Grafana admin password regenerated on every render.
+
+Result: `helm list -A` shows only `argocd`. Every other change, platform or application, goes through Git.
+Argo CD itself stays the single bootstrap step, deliberately not self-managed.
+
+![Argo CD managing platform and applications](docs/images/06-argocd-app-of-apps.png)
+
 </details>
 
 <details>
@@ -447,12 +469,14 @@ Tested end to end: generated ~10 % errors → inactive → pending → firing �
 - **Stateful app = 1 replica + `Recreate`:** two Pods must never open the same SQLite file. Trade-off: a short downtime on restarts, in exchange for data integrity.
 - **Dashboards and alerts live next to the app** (in its chart): they are deployed, versioned and rolled back together with it.
 - **Values files in Git instead of `helm --set`:** `--set` silently creates drift between the repository and the cluster.
+- **Argo CD is the only bootstrap step and is not self-managed:** if a self-managed Argo CD breaks itself during an upgrade, the tool that would fix it is the one that's broken. In production, Terraform would install it.
+- **Secrets the chart would generate are provided instead** (`existingSecret`): random values generated with Helm's `lookup` don't survive Argo CD's offline rendering.
 - **Uptime Kuma checks Services through cluster DNS** (`<svc>.<ns>.svc.cluster.local`): `*.lab` names only exist in my workstation's hosts file.
 
 </details>
 
 <details>
-<summary><b>Problems I hit: 28 real incidents, root cause and fix</b></summary>
+<summary><b>Problems I hit: 32 real incidents, root cause and fix</b></summary>
 
 Real troubleshooting, in the order it happened.
 
@@ -482,7 +506,7 @@ Real troubleshooting, in the order it happened.
 | Kaniko: `UNAUTHORIZED` from Docker Hub | Not an auth problem: the `FROM` line was missing the `python:` image name | Read the full image reference in the error |
 | Trivy fails on HIGH CVEs | Libraries vendored inside `pip` in the runtime image | `pip uninstall -y pip` in the Dockerfile |
 | `git push` rejected | Jenkins had committed a new tag in the meantime | `git pull --rebase` before every push (commit or stash first) |
-| Jenkins init container `CrashLoopBackOff` | Leftover files in an `emptyDir` from a previous attempt | Deleted the pod to get a fresh volume |
+| Jenkins stuck in `Init:CrashLoopBackOff` / `Unknown` after **every host reboot** | The init container's `cp` stopped at `overwrite?` on plugins left in an `emptyDir`. An emptyDir lives as long as the **pod**, and a node reboot restarts containers in the same pod. Deleting the pod only hid the problem | `controller.initializeOnce: true`. Found by reading the raw log in `/var/log/pods/` when `kubectl logs --previous` was gone |
 | Build waits forever for an agent | The agent pod lost its connection during a network drop | Aborted the build; added `timeout(20 min)` |
 | `java.lang.OutOfMemoryError: Java heap space` in sonar-scanner | After adding a 1 Gi memory limit, the JVM defaulted to 25 % of it (~256 MB heap) | `SONAR_SCANNER_JAVA_OPTS=-XX:MaxRAMPercentage=75` |
 | `stat image.tar: no such file` | Used "Restart from stage" at Push: it starts a **new** agent pod with an empty workspace | Re-run the full pipeline; added `ls -lh image.tar` at the end of Build to fail fast |
@@ -498,6 +522,15 @@ Real troubleshooting, in the order it happened.
 | "Provisioned dashboard cannot be deleted" | The Git-provisioned dashboard took over the UI one (same UID) | Expected: Git owns it now; tested by deleting the ConfigMap instead |
 | Discord notifications: `connection reset by peer` | Discord is blocked by the ISP in my country; the config was correct | Switched the receiver to email. Lesson: **the alert channel is a dependency too** |
 | Load tests froze my SSH session | 20 parallel curls saturated a single laptop | Generated the same error *ratio* with a light sequential loop; ran long commands from the Proxmox shell |
+
+### GitOps migration
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| Diff on local-path's StorageClass, even though the cluster already had it as default | The default-class annotation had been added with a manual `kubectl patch` and was never in Git (**drift**). A rebuild would have left every PVC `Pending` | Added the annotation to the manifest in Git |
+| Grafana admin Secret different on every Argo CD refresh | The chart keeps its random password stable with Helm's `lookup`, which Argo CD can't run (it renders offline) | Copied the current password into my own Secret, `grafana.admin.existingSecret`; synced first without prune, pruned the old Secret after verifying login |
+| New Application never appeared in Argo CD | `apps/local-path.yaml` was committed **empty** (0 bytes): the editor didn't save | Caught with `git show --stat HEAD`; now checking the stat before every push |
+| Strange duplicate block in the StorageClass diff | Typo `annotiations:` | `kubectl apply --dry-run=server` reports unknown fields; `--dry-run=client` doesn't |
 
 The most important lesson: **the dangerous bugs are the silent ones.** A label typo, a missing port name,
 a ServiceMonitor that doesn't exist or a rule without the right label produce no error at all.
@@ -517,7 +550,7 @@ and reading `helm template` output catches them.
 | Images are not signed | cosign signing + admission policy |
 | Single control-plane node | 3 control-plane nodes (HA etcd) |
 | No backups | Velero |
-| `infra/` applied with `helm upgrade` by hand | Platform components managed by Argo CD as well |
+| Argo CD installed by hand (bootstrap) | Terraform installs Argo CD with the cluster |
 | VMs created by hand | Terraform + Ansible |
 
 </details>
@@ -526,31 +559,24 @@ and reading `helm template` output catches them.
 <summary><b>Reproducing</b></summary>
 
 ```bash
-# Platform components
-helm repo add metallb https://metallb.github.io/metallb
-helm repo add traefik https://traefik.github.io/charts
+# 1) Bootstrap: Argo CD is the only thing installed by hand
 helm repo add argo https://argoproj.github.io/argo-helm
-helm repo add jenkins https://charts.jenkins.io
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm repo update
+helm upgrade --install argocd argo/argo-cd -n argocd --create-namespace --version 10.9.4 -f infra/argocd/values.yaml
 
-helm upgrade --install metallb metallb/metallb -n metallb-system --create-namespace --version 0.16.1 -f infra/metallb/values.yaml
-kubectl apply -f infra/metallb/config.yaml
-helm upgrade --install traefik traefik/traefik -n traefik --create-namespace --version 41.6.0 -f infra/traefik/values.yaml
-kubectl apply -f infra/local-path/local-path-storage.yaml
-
-# Secrets (never in Git)
+# 2) Secrets (never in Git)
 kubectl create namespace monitoring
 kubectl create secret generic gmail-smtp -n monitoring --from-literal=password='<gmail app password>'
+kubectl create secret generic grafana-admin -n monitoring \
+  --from-literal=admin-user=admin --from-literal=admin-password='<choose one>'
+kubectl create namespace jenkins
+kubectl create secret docker-registry ghcr-creds -n jenkins \
+  --docker-server=ghcr.io --docker-username='<github user>' --docker-password='<token with write:packages>'
 
-helm upgrade --install monitoring prometheus-community/kube-prometheus-stack -n monitoring --version 92.0.0 -f infra/monitoring/values.yaml
-helm upgrade --install argocd argo/argo-cd -n argocd --create-namespace --version 10.9.4 -f infra/argocd/values.yaml
-helm upgrade --install jenkins jenkins/jenkins -n jenkins --create-namespace --version 5.9.66 -f infra/jenkins/values.yaml
-
-# Applications: one command, Argo CD does the rest
+# 3) Everything else, platform and applications: one command
 kubectl apply -f root-app.yaml
 ```
 
-Then point the `*.lab` names (`demo`, `podinfo`, `whoami`, `tool`, `uptime`, `argocd`, `jenkins`, `grafana`, `prometheus`) to `192.168.0.250` in your hosts file.
+Then add the `sonarcloud-token` and `github-gitops` credentials in Jenkins, and point the `*.lab` names
+(`demo`, `podinfo`, `whoami`, `tool`, `uptime`, `argocd`, `jenkins`, `grafana`, `prometheus`) to `192.168.0.250` in your hosts file.
 
 </details>
