@@ -13,6 +13,10 @@
 
 ## Highlights
 
+**TL;DR:** A 3-node Kubernetes cluster I built from bare metal, with a fully automated
+pipeline: `git push` → tests → quality gate → image scan → GitOps deploy → monitoring → email alert.
+No managed services, every layer configured and debugged by hand.
+
 - **3-node vanilla Kubernetes** (kubeadm, not k3s) on Proxmox VMs cloned from one template
 - **Full CI/CD loop with no manual step:** `git push` → tests → SonarCloud quality gate → Kaniko build → **Trivy scan before push** → GHCR → Jenkins bumps the image tag in Git → Argo CD rolls it out
 - **Jenkins never touches the cluster.** It only writes to Git; Argo CD pulls (GitOps pull model)
