@@ -90,6 +90,12 @@ spec:
         - name: local-path-provisioner
           image: docker.io/rancher/local-path-provisioner:v0.0.37
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
           command:
             - local-path-provisioner
             - --debug
