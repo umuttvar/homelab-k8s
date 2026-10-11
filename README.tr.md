@@ -1,37 +1,127 @@
 # homelab-k8s
 
-> Eski bir laptop üzerinde sıfırdan kurulmuş, production benzeri bir Kubernetes platformu:
-> bare-metal hypervisor → kubeadm cluster → yük dengeleme, ingress, depolama →
-> Argo CD ile GitOps → Jenkins ile CI (test, kalite kapısı, image taraması) →
-> Prometheus/Grafana ile izleme → e-postama düşen alarmlar.
+> Eski bir laptop üzerinde, bare metal'den başlayarak kurduğum production benzeri bir Kubernetes platformu.
 
 🇬🇧 [English README](README.md) · 🐍 Uygulama reposu: [umuttvar/demo-app](https://github.com/umuttvar/demo-app)
 
-![Cluster genel görünüm](docs/images/01-cluster-overview.png)
+**Özetle:** Bare metal'den kurulmuş 3 node'lu bir Kubernetes cluster'ı ve tamamen otomatik bir pipeline:
+`git push` → testler → kalite kapısı → image taraması → GitOps ile deploy → izleme → e-posta alarmı.
+Hazır yönetilen servis yok: her katmanı elle kurdum ve hatalarını ayıkladım.
+
+---
+
+## Nasıl çalışıyor?
+
+```mermaid
+flowchart LR
+    dev["👨‍💻 git push"] --> app["demo-app reposu<br/>kod · Dockerfile · Jenkinsfile"]
+    app -->|"pollSCM 5 dk"| J
+
+    subgraph J["Jenkins (geçici agent pod'u)"]
+        direction LR
+        t["Test<br/>pytest + coverage"] --> s["Kalite kapısı<br/>SonarCloud"] --> b["Build<br/>Kaniko → tar"] --> v["Tarama<br/>Trivy"] --> p["Push<br/>crane → GHCR"] --> g["GitOps güncelle<br/>tag: 1.0.N"]
+    end
+
+    g -->|"commit"| ops["homelab-k8s reposu<br/>cluster'ın olması gereken hali"]
+    ops -->|"Argo CD 3 dk'da bir bakar"| argo["Argo CD"]
+    argo -->|"rolling update"| pods["demo-app pod'ları"]
+    pods -->|"/metrics"| prom["Prometheus"] --> graf["Grafana"]
+    prom --> am["Alertmanager"] --> mail["📧 E-posta"]
+```
+
+| | **demo-app** reposu | **homelab-k8s** reposu (bu repo) |
+|---|---|---|
+| Cevapladığı soru | *Ne* çalışacak? | *Nasıl ve nerede* çalışacak? |
+| İçerik | Kaynak kod, testler, Dockerfile, Jenkinsfile | Helm chart'ları, Argo CD uygulamaları, platform ayarları |
+| İzleyen | Jenkins | Argo CD |
+| Çıktı | Taranmış bir container image'ı | Çalışan pod'lar |
+
+İki repo arasındaki tek sözleşme **image tag'i**.
 
 ---
 
 ## Öne çıkanlar
 
-- Tek bir şablondan klonlanmış Proxmox VM'lerinde **3 node'lu vanilla Kubernetes** (kubeadm, k3s değil)
-- **Elle hiçbir adım olmayan CI/CD döngüsü:** `git push` → testler → SonarCloud kalite kapısı → Kaniko build → **push'tan önce Trivy taraması** → GHCR → Jenkins image tag'ini Git'te günceller → Argo CD yeni sürümü yayına alır
-- **Jenkins cluster'a hiç dokunmuyor.** Sadece Git'e yazıyor, Argo CD çekiyor (GitOps pull modeli)
-- **Her şey kod olarak:** uygulamalar, dashboard'lar (`ConfigMap` + Grafana sidecar) ve alarm kuralları (`PrometheusRule`) bu repoda yaşıyor
-- **Gözlemle bulunan, kodla düzeltilen sorun:** p95 gecikmesi kaba histogram kovaları yüzünden ~500 ms yerine 975 ms görünüyordu. Kodda düzelttim, pipeline'dan geçirdim ve ~740 ms olarak doğruladım
-- **En az yetkili secret'lar:** her araç için ayrı token, hiçbiri Git'te değil
+- Tek şablondan klonlanmış Proxmox VM'lerinde **3 node'lu vanilla Kubernetes** (kubeadm, k3s değil)
+- **Elle adım olmayan CI/CD:** testler → SonarCloud kalite kapısı → Kaniko build → **push'tan önce Trivy taraması** → GHCR → Argo CD
+- **Pull tabanlı GitOps:** Jenkins sadece Git'e yazıyor, cluster'a erişimi yok
+- **Her şey kod olarak:** uygulamalar, Grafana dashboard'ları ve alarm kuralları bu repoda
+- **Metrikle bulunan sorun:** yanıltıcı bir p95'i (500 ms'lik endpoint için 975 ms) buldum, kodda düzelttim, pipeline'dan geçirdim, ~740 ms olarak doğruladım
+- Kök nedeni ve çözümüyle belgelenmiş **28 gerçek sorun**
 
 ---
 
-## Neden bu proje?
+## Bir bakışta
+
+| Argo CD: App of Apps | Jenkins pipeline'ı |
+|---|---|
+| ![Argo CD](docs/images/06-argocd-app-of-apps.png) | ![Jenkins](docs/images/07-jenkins-pipeline.png) |
+| **Grafana: altın sinyaller** | **Gelen kutuma düşen alarm** |
+| ![Grafana](docs/images/12-grafana-dashboard.png) | ![Alarm e-postası](docs/images/16-alert-email.png) |
+
+---
+
+## Kullanılan teknolojiler
+
+| Katman | Araç | Not |
+|---|---|---|
+| Donanım | Eski laptop, 16 GB RAM | 7/24 sunucuya çevrildi, kapak kapanınca uyku kapatıldı |
+| Hypervisor | **Proxmox VE 9.2** | Type-1 (bare-metal) hypervisor, KVM/QEMU |
+| Misafir işletim sistemi | **Ubuntu Server 26.04 LTS** | Tek bir hazırlanmış şablondan klonlandı |
+| Container runtime | **containerd 2.2** | `SystemdCgroup = true` |
+| Kubernetes | **kubeadm ile v1.36.5** | 1 control plane + 2 worker, vanilla (k3s değil) |
+| CNI | **Flannel** | Pod CIDR `10.244.0.0/16` |
+| Paket yöneticisi | **Helm 4** | Kendi chart'larım + sürümü sabitlenmiş hazır chart'lar |
+| Load balancer | **MetalLB 0.16** (L2 modu) | RAM tasarrufu için FRR/BGP bileşenleri kapatıldı |
+| Ingress | **Traefik 3.7** | Mart 2026'da emekliye ayrılan ingress-nginx yerine seçildi |
+| Depolama | **local-path-provisioner** | Varsayılan StorageClass, dinamik PV oluşturma |
+| GitOps | **Argo CD 3.5** | App of Apps, `prune` + `selfHeal` ile otomatik senkronizasyon |
+| CI | Kubernetes üzerinde **Jenkins 2.580** | Controller + geçici agent pod'ları (6 container) |
+| Kod kalitesi | **SonarCloud** | CI tabanlı analiz, pipeline kalite kapısını bekliyor |
+| Image build | **Kaniko** | Kubernetes içinde daemon'suz, yetkisiz build |
+| Image taraması | **Trivy 0.75** | HIGH/CRITICAL, sadece düzeltmesi olan CVE'ler, pipeline'ı durdurur |
+| Registry | **GHCR** | Image'lar `crane` ile gönderiliyor |
+| İzleme | **kube-prometheus-stack** (Prometheus, Grafana, Alertmanager) | ServiceMonitor, PrometheusRule, kod olarak dashboard |
+| Erişilebilirlik kontrolü | **Uptime Kuma** | Cluster içi Service DNS üzerinden kontrol |
+| Uygulama | **FastAPI** (Python 3.13) | `/`, `/health`, `/slow`, `/error`, `/metrics` |
+
+---
+
+## Yol haritası
+
+- [x] Bare metal üzerinde Proxmox hypervisor
+- [x] VM şablonundan 3 node'lu kubeadm cluster
+- [x] MetalLB + Traefik + local-path depolama
+- [x] 5 uygulama için kendi yazdığım Helm chart'ları
+- [x] Argo CD ile GitOps (App of Apps, prune + self-heal)
+- [x] Jenkins ile CI: test → SonarCloud → Kaniko → Trivy → GHCR → GitOps commit'i
+- [x] Prometheus + Grafana ile izleme, kod olarak dashboard
+- [x] Alarmlar: PrometheusRule → Alertmanager → e-posta
+- [ ] `infra/`'yı da Argo CD ile yönetmek
+- [ ] cert-manager ile TLS
+- [ ] Sealed Secrets
+- [ ] Her şeyi Terraform (Proxmox provider) + Ansible ile yeniden kurmak
+
+---
+
+## Detaylar
+
+Açmak için bir bölüme tıkla.
+
+<details>
+<summary><b>Neden bu proje?</b></summary>
 
 Bulut sağlayıcılarının normalde bizden sakladığı katmanlarda gerçek deneyim kazanmak istedim.
 AWS ya da Azure'da load balancer IP'si, ingress adresi, CI çalıştırıcısı ve izleme altyapısı "hazır" gelir.
 Bu homelab'de **hiçbiri yoktu**: BIOS ayarlarından gelen kutuma düşen alarma kadar her katmanı
 elle kurdum, yapılandırdım ve hatalarını ayıkladım.
 
----
+</details>
 
-## Mimari
+<details>
+<summary><b>Mimari ve ağ planı</b></summary>
+
+![Cluster genel görünüm](docs/images/01-cluster-overview.png)
 
 ```mermaid
 flowchart TB
@@ -72,34 +162,6 @@ flowchart LR
 
 Tek IP, tek port, birçok uygulama: Traefik her isteği HTTP `Host` başlığına göre yönlendiriyor.
 
-### CI/CD akışı (iki repo)
-
-```mermaid
-flowchart LR
-    dev["👨‍💻 git push"] --> app["demo-app reposu<br/>kod · Dockerfile · Jenkinsfile"]
-    app -->|"pollSCM 5 dk"| J
-
-    subgraph J["Jenkins (geçici agent pod'u)"]
-        direction LR
-        t["Test<br/>pytest + coverage"] --> s["Kalite kapısı<br/>SonarCloud"] --> b["Build<br/>Kaniko → tar"] --> v["Tarama<br/>Trivy"] --> p["Push<br/>crane → GHCR"] --> g["GitOps güncelle<br/>tag: 1.0.N"]
-    end
-
-    g -->|"commit"| ops["homelab-k8s reposu<br/>cluster'ın olması gereken hali"]
-    ops -->|"Argo CD 3 dk'da bir bakar"| argo["Argo CD"]
-    argo -->|"rolling update"| pods["demo-app pod'ları"]
-    pods -->|"/metrics"| prom["Prometheus"] --> graf["Grafana"]
-    prom --> am["Alertmanager"] --> mail["📧 E-posta"]
-```
-
-| | **demo-app** reposu | **homelab-k8s** reposu (bu repo) |
-|---|---|---|
-| Cevapladığı soru | *Ne* çalışacak? | *Nasıl ve nerede* çalışacak? |
-| İçerik | Kaynak kod, testler, Dockerfile, Jenkinsfile | Helm chart'ları, Argo CD uygulamaları, platform ayarları |
-| İzleyen | Jenkins | Argo CD |
-| Çıktı | Taranmış bir container image'ı | Çalışan pod'lar |
-
-İki repo arasındaki tek sözleşme **image tag'i**.
-
 ### Ağ planı
 
 | Adres | Görevi |
@@ -114,35 +176,10 @@ flowchart LR
 | `10.244.0.0/16` | Pod ağı (Flannel) |
 | `10.96.0.0/12` | Service ağı (Kubernetes varsayılanı) |
 
----
+</details>
 
-## Kullanılan teknolojiler
-
-| Katman | Araç | Not |
-|---|---|---|
-| Donanım | Eski laptop, 16 GB RAM | 7/24 sunucuya çevrildi, kapak kapanınca uyku kapatıldı |
-| Hypervisor | **Proxmox VE 9.2** | Type-1 (bare-metal) hypervisor, KVM/QEMU |
-| Misafir işletim sistemi | **Ubuntu Server 26.04 LTS** | Tek bir hazırlanmış şablondan klonlandı |
-| Container runtime | **containerd 2.2** | `SystemdCgroup = true` |
-| Kubernetes | **kubeadm ile v1.36.5** | 1 control plane + 2 worker, vanilla (k3s değil) |
-| CNI | **Flannel** | Pod CIDR `10.244.0.0/16` |
-| Paket yöneticisi | **Helm 4** | Kendi chart'larım + sürümü sabitlenmiş hazır chart'lar |
-| Load balancer | **MetalLB 0.16** (L2 modu) | RAM tasarrufu için FRR/BGP bileşenleri kapatıldı |
-| Ingress | **Traefik 3.7** | Mart 2026'da emekliye ayrılan ingress-nginx yerine seçildi |
-| Depolama | **local-path-provisioner** | Varsayılan StorageClass, dinamik PV oluşturma |
-| GitOps | **Argo CD 3.5** | App of Apps, `prune` + `selfHeal` ile otomatik senkronizasyon |
-| CI | Kubernetes üzerinde **Jenkins 2.580** | Controller + geçici agent pod'ları (6 container) |
-| Kod kalitesi | **SonarCloud** | CI tabanlı analiz, pipeline kalite kapısını bekliyor |
-| Image build | **Kaniko** | Kubernetes içinde daemon'suz, yetkisiz build |
-| Image taraması | **Trivy 0.75** | HIGH/CRITICAL, sadece düzeltmesi olan CVE'ler, pipeline'ı durdurur |
-| Registry | **GHCR** | Image'lar `crane` ile gönderiliyor |
-| İzleme | **kube-prometheus-stack** (Prometheus, Grafana, Alertmanager) | ServiceMonitor, PrometheusRule, kod olarak dashboard |
-| Erişilebilirlik kontrolü | **Uptime Kuma** | Cluster içi Service DNS üzerinden kontrol |
-| Uygulama | **FastAPI** (Python 3.13) | `/`, `/health`, `/slow`, `/error`, `/metrics` |
-
----
-
-## Repo yapısı
+<details>
+<summary><b>Repo yapısı</b></summary>
 
 ```
 homelab-k8s/
@@ -182,9 +219,10 @@ homelab-k8s/
 > `apps/` ve `charts/` Argo CD tarafından uygulanıyor: push = deploy.
 > `infra/` platformun nasıl kurulduğunun kaydı. `helm upgrade` ile elle uygulanıyor (bkz. [Yol haritası](#yol-haritası)).
 
----
+</details>
 
-## Nasıl kuruldu?
+<details>
+<summary><b>Nasıl kuruldu: BIOS'tan alarmlara 10 aşama</b></summary>
 
 ### Aşama 0: Laptopu hypervisor'a çevirmek
 
@@ -388,9 +426,10 @@ Uçtan uca test edildi: ~%10 hata üretildi → inactive → pending → firing 
 ![Prometheus'ta firing alarm](docs/images/15-alert-firing.png)
 ![Alarm e-postası](docs/images/16-alert-email.png)
 
----
+</details>
 
-## Tasarım kararları
+<details>
+<summary><b>Tasarım kararları</b></summary>
 
 - **k3s yerine vanilla Kubernetes (kubeadm):** Şirketlerin kullandığına ve CKA sınavına daha yakın, hiçbir şey gizlenmiyor.
 - **ingress-nginx yerine Traefik:** ingress-nginx Mart 2026'da emekliye ayrıldı. Traefik hem Ingress'i hem Gateway API'yi destekliyor.
@@ -407,9 +446,10 @@ Uçtan uca test edildi: ~%10 hata üretildi → inactive → pending → firing 
 - **`helm --set` yerine Git'teki values dosyaları:** `--set` repo ile cluster arasında sessizce sapma (drift) yaratır.
 - **Uptime Kuma, Service'leri cluster DNS'i üzerinden kontrol ediyor** (`<svc>.<ns>.svc.cluster.local`): `*.lab` isimleri sadece benim bilgisayarımın hosts dosyasında var.
 
----
+</details>
 
-## Karşılaştığım sorunlar ve çözümleri
+<details>
+<summary><b>Karşılaştığım sorunlar: 28 gerçek olay, kök neden ve çözüm</b></summary>
 
 Gerçek hata ayıklama süreci, yaşandığı sırayla.
 
@@ -461,9 +501,10 @@ hiç var olmayan bir ServiceMonitor ya da doğru label'ı taşımayan bir kural 
 Zinciri isimler üzerinden takip etmek (Ingress → Service → Endpoints → Pod, ServiceMonitor → Service, kural → selector)
 ve `helm template` çıktısını okumak bu hataları yakalıyor.
 
----
+</details>
 
-## Bilinen sınırlar (production'da ne yapılırdı?)
+<details>
+<summary><b>Bilinen sınırlar (production'da ne yapılırdı?)</b></summary>
 
 | Burada | Production'da |
 |---|---|
@@ -476,26 +517,10 @@ ve `helm template` çıktısını okumak bu hataları yakalıyor.
 | `infra/` elle `helm upgrade` ile uygulanıyor | Platform bileşenleri de Argo CD ile yönetilir |
 | VM'ler elle oluşturuldu | Terraform + Ansible |
 
----
+</details>
 
-## Yol haritası
-
-- [x] Bare metal üzerinde Proxmox hypervisor
-- [x] VM şablonundan 3 node'lu kubeadm cluster
-- [x] MetalLB + Traefik + local-path depolama
-- [x] 5 uygulama için kendi yazdığım Helm chart'ları
-- [x] Argo CD ile GitOps (App of Apps, prune + self-heal)
-- [x] Jenkins ile CI: test → SonarCloud → Kaniko → Trivy → GHCR → GitOps commit'i
-- [x] Prometheus + Grafana ile izleme, kod olarak dashboard
-- [x] Alarmlar: PrometheusRule → Alertmanager → e-posta
-- [ ] `infra/`'yı da Argo CD ile yönetmek
-- [ ] cert-manager ile TLS
-- [ ] Sealed Secrets
-- [ ] Her şeyi Terraform (Proxmox provider) + Ansible ile yeniden kurmak
-
----
-
-## Tekrar kurmak için
+<details>
+<summary><b>Tekrar kurmak için</b></summary>
 
 ```bash
 # Platform bileşenleri
@@ -524,3 +549,5 @@ kubectl apply -f root-app.yaml
 ```
 
 Son olarak hosts dosyanda `*.lab` isimlerini (`demo`, `podinfo`, `whoami`, `tool`, `uptime`, `argocd`, `jenkins`, `grafana`, `prometheus`) `192.168.0.250`'ye yönlendir.
+
+</details>

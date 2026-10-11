@@ -1,13 +1,42 @@
 # homelab-k8s
 
-> A production-style Kubernetes platform built from scratch on a repurposed laptop:
-> bare-metal hypervisor → kubeadm cluster → load balancing, ingress, storage →
-> GitOps with Argo CD → CI with Jenkins (tests, quality gate, image scan) →
-> Prometheus/Grafana monitoring → alerting to my inbox.
+> A production-style Kubernetes platform I built from bare metal on a repurposed laptop.
 
 🇹🇷 [Türkçe README](README.tr.md) · 🐍 Application repo: [umuttvar/demo-app](https://github.com/umuttvar/demo-app)
 
-![Cluster overview](docs/images/01-cluster-overview.png)
+**TL;DR:** A 3-node Kubernetes cluster built from bare metal, with a fully automated pipeline:
+`git push` → tests → quality gate → image scan → GitOps deploy → monitoring → email alert.
+No managed services: every layer configured and debugged by hand.
+
+---
+
+## How it works
+
+```mermaid
+flowchart LR
+    dev["👨‍💻 git push"] --> app["demo-app repo<br/>code · Dockerfile · Jenkinsfile"]
+    app -->|"pollSCM 5 min"| J
+
+    subgraph J["Jenkins (ephemeral agent pod)"]
+        direction LR
+        t["Test<br/>pytest + coverage"] --> s["Quality gate<br/>SonarCloud"] --> b["Build<br/>Kaniko → tar"] --> v["Scan<br/>Trivy"] --> p["Push<br/>crane → GHCR"] --> g["Update GitOps<br/>tag: 1.0.N"]
+    end
+
+    g -->|"commit"| ops["homelab-k8s repo<br/>desired cluster state"]
+    ops -->|"Argo CD polls 3 min"| argo["Argo CD"]
+    argo -->|"rolling update"| pods["demo-app pods"]
+    pods -->|"/metrics"| prom["Prometheus"] --> graf["Grafana"]
+    prom --> am["Alertmanager"] --> mail["📧 Email"]
+```
+
+| | **demo-app** repo | **homelab-k8s** repo (this one) |
+|---|---|---|
+| Question it answers | *What* runs? | *How and where* does it run? |
+| Contents | Source code, tests, Dockerfile, Jenkinsfile | Helm charts, Argo CD apps, platform config |
+| Watched by | Jenkins | Argo CD |
+| Output | A scanned container image | Running pods |
+
+The only contract between the two repos is the **image tag**.
 
 ---
 
@@ -18,24 +47,85 @@ pipeline: `git push` → tests → quality gate → image scan → GitOps deploy
 No managed services, every layer configured and debugged by hand.
 
 - **3-node vanilla Kubernetes** (kubeadm, not k3s) on Proxmox VMs cloned from one template
-- **Full CI/CD loop with no manual step:** `git push` → tests → SonarCloud quality gate → Kaniko build → **Trivy scan before push** → GHCR → Jenkins bumps the image tag in Git → Argo CD rolls it out
-- **Jenkins never touches the cluster.** It only writes to Git; Argo CD pulls (GitOps pull model)
-- **Everything as code:** apps, dashboards (`ConfigMap` + Grafana sidecar) and alert rules (`PrometheusRule`) live in this repo
-- **Observability-driven fix:** found that p95 latency was reported as 975 ms instead of ~500 ms because of coarse histogram buckets, fixed it in code, shipped it through the pipeline and verified ~740 ms
-- **Least-privilege secrets:** one token per tool, none of them in Git
+- **Zero-touch CI/CD:** tests → SonarCloud quality gate → Kaniko build → **Trivy scan before push** → GHCR → Argo CD
+- **Pull-based GitOps:** Jenkins only writes to Git and has no access to the cluster
+- **Everything as code:** apps, Grafana dashboards and alert rules all live in this repo
+- **Metrics-driven fix:** found a misleading p95 (975 ms for a 500 ms endpoint), fixed it in code, shipped it through the pipeline, verified ~740 ms
+- **28 real incidents** documented with root cause and fix
 
 ---
 
-## Why this project?
+## At a glance
+
+| Argo CD: App of Apps | Jenkins pipeline |
+|---|---|
+| ![Argo CD](docs/images/06-argocd-app-of-apps.png) | ![Jenkins](docs/images/07-jenkins-pipeline.png) |
+| **Grafana: golden signals** | **Alert in my inbox** |
+| ![Grafana](docs/images/12-grafana-dashboard.png) | ![Alert email](docs/images/16-alert-email.png) |
+
+---
+
+## Tech stack
+
+| Layer | Tool | Notes |
+|---|---|---|
+| Hardware | Old laptop, 16 GB RAM | Repurposed as a 24/7 server, lid-close suspend disabled |
+| Hypervisor | **Proxmox VE 9.2** | Type-1 (bare-metal) hypervisor, KVM/QEMU |
+| Guest OS | **Ubuntu Server 26.04 LTS** | Cloned from a single prepared template |
+| Container runtime | **containerd 2.2** | `SystemdCgroup = true` |
+| Kubernetes | **v1.36.5 via kubeadm** | 1 control plane + 2 workers, vanilla (not k3s) |
+| CNI | **Flannel** | Pod CIDR `10.244.0.0/16` |
+| Package manager | **Helm 4** | Own charts + pinned third-party charts with values files |
+| Load balancer | **MetalLB 0.16** (L2 mode) | FRR/BGP components disabled to save RAM |
+| Ingress | **Traefik 3.7** | Chosen over ingress-nginx, which was retired in March 2026 |
+| Storage | **local-path-provisioner** | Default StorageClass, dynamic PV provisioning |
+| GitOps | **Argo CD 3.5** | App of Apps, automated sync with `prune` + `selfHeal` |
+| CI | **Jenkins 2.580** on Kubernetes | Controller + ephemeral agent pods (6 containers) |
+| Code quality | **SonarCloud** | CI-based analysis, pipeline waits for the quality gate |
+| Image build | **Kaniko** | Daemonless, unprivileged builds inside Kubernetes |
+| Image scan | **Trivy 0.75** | HIGH/CRITICAL, fixed CVEs only, blocks the pipeline |
+| Registry | **GHCR** | Images pushed with `crane` |
+| Monitoring | **kube-prometheus-stack** (Prometheus, Grafana, Alertmanager) | ServiceMonitor, PrometheusRule, dashboards as code |
+| Uptime checks | **Uptime Kuma** | Checks via in-cluster Service DNS |
+| Application | **FastAPI** (Python 3.13) | `/`, `/health`, `/slow`, `/error`, `/metrics` |
+
+---
+
+## Roadmap
+
+- [x] Proxmox hypervisor on bare metal
+- [x] 3-node kubeadm cluster from a VM template
+- [x] MetalLB + Traefik + local-path storage
+- [x] Self-written Helm charts for 5 applications
+- [x] GitOps with Argo CD (App of Apps, prune + self-heal)
+- [x] CI with Jenkins: test → SonarCloud → Kaniko → Trivy → GHCR → GitOps commit
+- [x] Prometheus + Grafana monitoring, dashboards as code
+- [x] Alerting: PrometheusRule → Alertmanager → email
+- [ ] Manage `infra/` with Argo CD too
+- [ ] TLS with cert-manager
+- [ ] Sealed Secrets
+- [ ] Rebuild everything with Terraform (Proxmox provider) + Ansible
+
+---
+
+## Deep dive
+
+Click a section to expand it.
+
+<details>
+<summary><b>Why this project?</b></summary>
 
 I wanted hands-on experience with the things cloud providers normally hide from you.
 On AWS or Azure you get a load balancer IP, an ingress endpoint, a CI runner and a
 monitoring stack "for free". In this homelab **there was nothing**: every layer had to be built,
 configured and debugged by hand, from BIOS settings up to the alert that lands in my inbox.
 
----
+</details>
 
-## Architecture
+<details>
+<summary><b>Architecture &amp; network plan</b></summary>
+
+![Cluster overview](docs/images/01-cluster-overview.png)
 
 ```mermaid
 flowchart TB
@@ -76,34 +166,6 @@ flowchart LR
 
 One IP, one port, many applications: Traefik routes each request by its HTTP `Host` header.
 
-### CI/CD flow (two repositories)
-
-```mermaid
-flowchart LR
-    dev["👨‍💻 git push"] --> app["demo-app repo<br/>code · Dockerfile · Jenkinsfile"]
-    app -->|"pollSCM 5 min"| J
-
-    subgraph J["Jenkins (ephemeral agent pod)"]
-        direction LR
-        t["Test<br/>pytest + coverage"] --> s["Quality gate<br/>SonarCloud"] --> b["Build<br/>Kaniko → tar"] --> v["Scan<br/>Trivy"] --> p["Push<br/>crane → GHCR"] --> g["Update GitOps<br/>tag: 1.0.N"]
-    end
-
-    g -->|"commit"| ops["homelab-k8s repo<br/>desired cluster state"]
-    ops -->|"Argo CD polls 3 min"| argo["Argo CD"]
-    argo -->|"rolling update"| pods["demo-app pods"]
-    pods -->|"/metrics"| prom["Prometheus"] --> graf["Grafana"]
-    prom --> am["Alertmanager"] --> mail["📧 Email"]
-```
-
-| | **demo-app** repo | **homelab-k8s** repo (this one) |
-|---|---|---|
-| Question it answers | *What* runs? | *How and where* does it run? |
-| Contents | Source code, tests, Dockerfile, Jenkinsfile | Helm charts, Argo CD apps, platform config |
-| Watched by | Jenkins | Argo CD |
-| Output | A scanned container image | Running pods |
-
-The only contract between the two repos is the **image tag**.
-
 ### Network plan
 
 | Address | Purpose |
@@ -118,35 +180,10 @@ The only contract between the two repos is the **image tag**.
 | `10.244.0.0/16` | Pod network (Flannel) |
 | `10.96.0.0/12` | Service network (Kubernetes default) |
 
----
+</details>
 
-## Tech stack
-
-| Layer | Tool | Notes |
-|---|---|---|
-| Hardware | Old laptop, 16 GB RAM | Repurposed as a 24/7 server, lid-close suspend disabled |
-| Hypervisor | **Proxmox VE 9.2** | Type-1 (bare-metal) hypervisor, KVM/QEMU |
-| Guest OS | **Ubuntu Server 26.04 LTS** | Cloned from a single prepared template |
-| Container runtime | **containerd 2.2** | `SystemdCgroup = true` |
-| Kubernetes | **v1.36.5 via kubeadm** | 1 control plane + 2 workers, vanilla (not k3s) |
-| CNI | **Flannel** | Pod CIDR `10.244.0.0/16` |
-| Package manager | **Helm 4** | Own charts + pinned third-party charts with values files |
-| Load balancer | **MetalLB 0.16** (L2 mode) | FRR/BGP components disabled to save RAM |
-| Ingress | **Traefik 3.7** | Chosen over ingress-nginx, which was retired in March 2026 |
-| Storage | **local-path-provisioner** | Default StorageClass, dynamic PV provisioning |
-| GitOps | **Argo CD 3.5** | App of Apps, automated sync with `prune` + `selfHeal` |
-| CI | **Jenkins 2.580** on Kubernetes | Controller + ephemeral agent pods (6 containers) |
-| Code quality | **SonarCloud** | CI-based analysis, pipeline waits for the quality gate |
-| Image build | **Kaniko** | Daemonless, unprivileged builds inside Kubernetes |
-| Image scan | **Trivy 0.75** | HIGH/CRITICAL, fixed CVEs only, blocks the pipeline |
-| Registry | **GHCR** | Images pushed with `crane` |
-| Monitoring | **kube-prometheus-stack** (Prometheus, Grafana, Alertmanager) | ServiceMonitor, PrometheusRule, dashboards as code |
-| Uptime checks | **Uptime Kuma** | Checks via in-cluster Service DNS |
-| Application | **FastAPI** (Python 3.13) | `/`, `/health`, `/slow`, `/error`, `/metrics` |
-
----
-
-## Repository structure
+<details>
+<summary><b>Repository structure</b></summary>
 
 ```
 homelab-k8s/
@@ -186,9 +223,10 @@ homelab-k8s/
 > `apps/` and `charts/` are reconciled by Argo CD: a push is a deploy.
 > `infra/` is the record of how the platform was installed; it is applied with `helm upgrade` (see [Roadmap](#roadmap)).
 
----
+</details>
 
-## How it was built
+<details>
+<summary><b>How it was built: 10 phases, from BIOS to alerting</b></summary>
 
 ### Phase 0 — Turning a laptop into a hypervisor
 
@@ -391,9 +429,10 @@ Tested end to end: generated ~10 % errors → inactive → pending → firing �
 ![Alert firing in Prometheus](docs/images/15-alert-firing.png)
 ![Alert email](docs/images/16-alert-email.png)
 
----
+</details>
 
-## Design decisions
+<details>
+<summary><b>Design decisions</b></summary>
 
 - **Vanilla Kubernetes (kubeadm) instead of k3s:** closer to what companies run and to the CKA exam; nothing is hidden.
 - **Traefik instead of ingress-nginx:** ingress-nginx reached end of life in March 2026; Traefik supports both Ingress and Gateway API.
@@ -410,9 +449,10 @@ Tested end to end: generated ~10 % errors → inactive → pending → firing �
 - **Values files in Git instead of `helm --set`:** `--set` silently creates drift between the repository and the cluster.
 - **Uptime Kuma checks Services through cluster DNS** (`<svc>.<ns>.svc.cluster.local`): `*.lab` names only exist in my workstation's hosts file.
 
----
+</details>
 
-## Problems I hit (and how I solved them)
+<details>
+<summary><b>Problems I hit: 28 real incidents, root cause and fix</b></summary>
 
 Real troubleshooting, in the order it happened.
 
@@ -464,9 +504,10 @@ a ServiceMonitor that doesn't exist or a rule without the right label produce no
 Following the chain by name (Ingress → Service → Endpoints → Pod, ServiceMonitor → Service, rule → selector)
 and reading `helm template` output catches them.
 
----
+</details>
 
-## Known limitations (and what production would do)
+<details>
+<summary><b>Known limitations (and what production would do)</b></summary>
 
 | Here | In production |
 |---|---|
@@ -479,26 +520,10 @@ and reading `helm template` output catches them.
 | `infra/` applied with `helm upgrade` by hand | Platform components managed by Argo CD as well |
 | VMs created by hand | Terraform + Ansible |
 
----
+</details>
 
-## Roadmap
-
-- [x] Proxmox hypervisor on bare metal
-- [x] 3-node kubeadm cluster from a VM template
-- [x] MetalLB + Traefik + local-path storage
-- [x] Self-written Helm charts for 5 applications
-- [x] GitOps with Argo CD (App of Apps, prune + self-heal)
-- [x] CI with Jenkins: test → SonarCloud → Kaniko → Trivy → GHCR → GitOps commit
-- [x] Prometheus + Grafana monitoring, dashboards as code
-- [x] Alerting: PrometheusRule → Alertmanager → email
-- [ ] Manage `infra/` with Argo CD too
-- [ ] TLS with cert-manager
-- [ ] Sealed Secrets
-- [ ] Rebuild everything with Terraform (Proxmox provider) + Ansible
-
----
-
-## Reproducing
+<details>
+<summary><b>Reproducing</b></summary>
 
 ```bash
 # Platform components
@@ -527,3 +552,5 @@ kubectl apply -f root-app.yaml
 ```
 
 Then point the `*.lab` names (`demo`, `podinfo`, `whoami`, `tool`, `uptime`, `argocd`, `jenkins`, `grafana`, `prometheus`) to `192.168.0.250` in your hosts file.
+
+</details>
