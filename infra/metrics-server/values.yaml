@@ -1,0 +1,4 @@
+#kubelet sertifika IP SAN adresi doğrulaması
+
+args:
+  - --kubelet-insecure-tls
