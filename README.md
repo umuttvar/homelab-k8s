@@ -48,6 +48,7 @@ The only contract between the two repos is the **image tag**.
 - **Everything as code:** apps, Grafana dashboards and alert rules all live in this repo
 - **Metrics-driven fix:** found a misleading p95 (975 ms for a 500 ms endpoint), fixed it in code, shipped it through the pipeline, verified ~740 ms
 - **32 real incidents** documented with root cause and fix
+- **Autoscaling:** metrics-server + HPA (2–5 replicas at 50 % CPU), verified with a load test (scaled up to 5, back to 2)
 
 ---
 
@@ -98,9 +99,6 @@ The only contract between the two repos is the **image tag**.
 - [x] Prometheus + Grafana monitoring, dashboards as code
 - [x] Alerting: PrometheusRule → Alertmanager → email
 - [x] Platform components (`infra/`) managed by Argo CD too, migrated with zero downtime
-- [ ] TLS with cert-manager
-- [ ] Sealed Secrets
-- [ ] Rebuild everything with Terraform (Proxmox provider) + Ansible
 
 ---
 
